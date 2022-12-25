@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Storage Project</string>
+    <string name="private_storage">Private Storage</string>
+    <string name="shared_storage">Shared Storage</string>
+    <string name="private_str">Private</string>
+</resources>
