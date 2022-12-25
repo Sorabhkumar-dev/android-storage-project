@@ -22,9 +22,8 @@ class PrivateStorageAdapter @Inject constructor() : RecyclerView.Adapter<ImageVi
 
     override fun onBindViewHolder(holder: ImageVieHolder, position: Int) {
         holder.binding.imgStorage.setImageBitmap(photos[position].bitmap)
-        holder.binding.imgStorage.setOnLongClickListener {
+        holder.binding.imgStorage.setOnClickListener {
             onPhotoClick?.let { onPhoto -> onPhoto(photos[position].fileName) }
-            true
         }
     }
 

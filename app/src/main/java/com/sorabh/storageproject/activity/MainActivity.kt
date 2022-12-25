@@ -71,9 +71,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onPhotoClicked(photoName: String) {
-        if (deletePhoto(photoName))
+        if (deletePhoto(photoName)) {
+            lifecycleScope.launch {
+                photoAdapter.updatePhotos(loadPhotosFromInternalStorage())
+            }
             Toast.makeText(this, "file deleted successfully!", Toast.LENGTH_LONG).show()
-        else
+        }else
             Toast.makeText(this, "failed to delete file!", Toast.LENGTH_LONG).show()
     }
 
