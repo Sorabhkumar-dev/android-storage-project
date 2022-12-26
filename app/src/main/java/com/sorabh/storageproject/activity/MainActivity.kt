@@ -1,16 +1,24 @@
 package com.sorabh.storageproject.activity
 
+import android.Manifest
+import android.content.ContentValues
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.widget.Toast
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.launch
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.sorabh.storageproject.adapter.PrivateStorageAdapter
 import com.sorabh.storageproject.databinding.ActivityMainBinding
 import com.sorabh.storageproject.model.InternalStoragePhoto
+import com.sorabh.storageproject.utils.sdk29AndAbove
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -26,36 +34,43 @@ class MainActivity : AppCompatActivity() {
     @Inject
     lateinit var photoAdapter: PrivateStorageAdapter
 
+    private var readPermissionRequest = false
+    private var writePermissionRequest = false
+    private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setupRecyclerView()
         capturePhoto()
+        updateOrRequestPermission()
     }
 
     private fun capturePhoto() {
         val takePhoto = registerForActivityResult(ActivityResultContracts.TakePicturePreview()) {
             it?.let { bitmap ->
-                if (binding.isPrivateSwitch.isChecked) {
-                    val isSavedSuccessfully =
+                val isSavedSuccessfully = when {
+                    binding.isPrivateSwitch.isChecked ->
                         savePhotoToInternalStorage(UUID.randomUUID().toString(), bitmap)
-                    if (isSavedSuccessfully) {
-                        lifecycleScope.launch {
-                            photoAdapter.updatePhotos(loadPhotosFromInternalStorage())
-                            Toast.makeText(
-                                this@MainActivity,
-                                "Photo saved successfully!",
-                                Toast.LENGTH_LONG
-                            ).show()
-                        }
-                    }else{
+                    writePermissionRequest ->
+                        savePhotoToExternalStorage(UUID.randomUUID().toString(), bitmap)
+                    else -> false
+                }
+                if (isSavedSuccessfully) {
+                    lifecycleScope.launch {
+                        photoAdapter.updatePhotos(loadPhotosFromInternalStorage())
                         Toast.makeText(
                             this@MainActivity,
-                            "failed to save photo!",
+                            "Photo saved successfully!",
                             Toast.LENGTH_LONG
                         ).show()
                     }
+                } else {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "failed to save photo!",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
             }
         }
@@ -113,4 +128,66 @@ class MainActivity : AppCompatActivity() {
             false
         }
     }
+
+    /**                        external storage                                */
+
+    private fun updateOrRequestPermission() {
+        permissionLauncher =
+            registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permission ->
+                readPermissionRequest =
+                    permission[Manifest.permission.READ_EXTERNAL_STORAGE]  ?: readPermissionRequest
+                writePermissionRequest =
+                    permission[Manifest.permission.WRITE_EXTERNAL_STORAGE] ?: writePermissionRequest
+            }
+
+        val hasReadPermission = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        ) == PackageManager.PERMISSION_GRANTED
+        val hasWritePermission = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE
+        ) == PackageManager.PERMISSION_GRANTED
+
+        val minSdk29 = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        readPermissionRequest = hasReadPermission
+        writePermissionRequest = hasWritePermission || minSdk29
+
+        val permissionToRequest = mutableListOf<String>()
+
+        if (!readPermissionRequest)
+            permissionToRequest.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+
+        if (!writePermissionRequest)
+            permissionToRequest.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+
+        if (permissionToRequest.isNotEmpty())
+            permissionLauncher.launch(permissionToRequest.toTypedArray())
+    }
+
+    private fun savePhotoToExternalStorage(displayName: String, bitmap: Bitmap): Boolean {
+        val imageCollection = sdk29AndAbove {
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        } ?: MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+
+        val contentValues = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "$displayName.jpg")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.WIDTH, bitmap.width)
+            put(MediaStore.Images.Media.HEIGHT, bitmap.height)
+        }
+        return try {
+            contentResolver?.insert(imageCollection, contentValues)?.also { uri ->
+                contentResolver.openOutputStream(uri).use { outputStream ->
+                    if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 96, outputStream))
+                        throw IOException("Couldn't save bitmap")
+                }
+            } ?: throw IOException("Couldn't create MediaStore entry!")
+            true
+        } catch (e: IOException) {
+            e.printStackTrace()
+            false
+        }
+    }
+
 }
