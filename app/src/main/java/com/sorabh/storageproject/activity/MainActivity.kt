@@ -1,23 +1,31 @@
 package com.sorabh.storageproject.activity
 
 import android.Manifest
+import android.app.RecoverableSecurityException
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.pm.PackageManager
+import android.database.ContentObserver
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.MediaStore
+import android.provider.MediaStore.*
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.launch
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.sorabh.storageproject.adapter.PrivateStorageAdapter
+import com.sorabh.storageproject.adapter.SharedStorageAdapter
 import com.sorabh.storageproject.databinding.ActivityMainBinding
 import com.sorabh.storageproject.model.InternalStoragePhoto
+import com.sorabh.storageproject.model.SharedStoragePhoto
 import com.sorabh.storageproject.utils.sdk29AndAbove
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
@@ -34,16 +42,35 @@ class MainActivity : AppCompatActivity() {
     @Inject
     lateinit var photoAdapter: PrivateStorageAdapter
 
+    @Inject
+    lateinit var sharedPhotoAdapter: SharedStorageAdapter
+
     private var readPermissionRequest = false
     private var writePermissionRequest = false
+    private lateinit var contentObserver: ContentObserver
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
+    private lateinit var intentSenderLauncher: ActivityResultLauncher<IntentSenderRequest>
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-        setupRecyclerView()
         capturePhoto()
         updateOrRequestPermission()
+        setupRecyclerView()
+        initObserver()
+        contentResolver.registerContentObserver(
+            Images.Media.EXTERNAL_CONTENT_URI,
+            true,
+            contentObserver
+        )
+        intentSenderLauncher =
+            registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
+                if (it.resultCode == RESULT_OK) {
+                    Toast.makeText(this, "Photo deleted successfully!", Toast.LENGTH_LONG).show()
+                }else {
+                    Toast.makeText(this, "Photo not deleted!", Toast.LENGTH_LONG).show()
+                }
+            }
     }
 
     private fun capturePhoto() {
@@ -82,6 +109,12 @@ class MainActivity : AppCompatActivity() {
         binding.rvPrivateStorage.adapter = photoAdapter
         lifecycleScope.launch {
             photoAdapter.updatePhotos(loadPhotosFromInternalStorage())
+        }
+        sharedPhotoAdapter.onPhotoClick = ::deletePhotoFromExternalStorage
+        binding.rvSharedStorage.adapter = sharedPhotoAdapter
+        lifecycleScope.launch {
+            if (readPermissionRequest)
+                sharedPhotoAdapter.updatePhotos(loadPhotosFromExternalStorage())
         }
     }
 
@@ -135,7 +168,7 @@ class MainActivity : AppCompatActivity() {
         permissionLauncher =
             registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permission ->
                 readPermissionRequest =
-                    permission[Manifest.permission.READ_EXTERNAL_STORAGE]  ?: readPermissionRequest
+                    permission[Manifest.permission.READ_EXTERNAL_STORAGE] ?: readPermissionRequest
                 writePermissionRequest =
                     permission[Manifest.permission.WRITE_EXTERNAL_STORAGE] ?: writePermissionRequest
             }
@@ -167,14 +200,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun savePhotoToExternalStorage(displayName: String, bitmap: Bitmap): Boolean {
         val imageCollection = sdk29AndAbove {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        } ?: MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            Images.Media.getContentUri(VOLUME_EXTERNAL_PRIMARY)
+        } ?: Images.Media.EXTERNAL_CONTENT_URI
 
         val contentValues = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "$displayName.jpg")
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.WIDTH, bitmap.width)
-            put(MediaStore.Images.Media.HEIGHT, bitmap.height)
+            put(Images.Media.DISPLAY_NAME, "$displayName.jpg")
+            put(Images.Media.MIME_TYPE, "image/jpeg")
+            put(Images.Media.WIDTH, bitmap.width)
+            put(Images.Media.HEIGHT, bitmap.height)
         }
         return try {
             contentResolver?.insert(imageCollection, contentValues)?.also { uri ->
@@ -190,4 +223,90 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun initObserver() {
+        contentObserver = object : ContentObserver(null) {
+            override fun onChange(selfChange: Boolean) {
+                lifecycleScope.launch {
+                    if (readPermissionRequest)
+                        sharedPhotoAdapter.updatePhotos(loadPhotosFromExternalStorage())
+                }
+            }
+        }
+    }
+
+    private suspend fun loadPhotosFromExternalStorage(): List<SharedStoragePhoto> {
+        return withContext(Dispatchers.IO) {
+            val photos = mutableListOf<SharedStoragePhoto>()
+            val collection = sdk29AndAbove {
+                Images.Media.getContentUri(VOLUME_EXTERNAL)
+            } ?: Images.Media.EXTERNAL_CONTENT_URI
+
+
+            val projection = arrayOf(
+                Images.Media._ID,
+                Images.Media.DISPLAY_NAME,
+                Images.Media.WIDTH,
+                Images.Media.HEIGHT
+            )
+            contentResolver.query(
+                collection,
+                projection,
+                null,
+                null,
+                "${Images.Media.DISPLAY_NAME} ASC"
+            )?.use { cursur ->
+                val idColumn = cursur.getColumnIndexOrThrow(Images.Media._ID)
+                val displayNameColumn =
+                    cursur.getColumnIndexOrThrow(Images.Media.DISPLAY_NAME)
+                val widthColumn = cursur.getColumnIndexOrThrow(Images.Media.WIDTH)
+                val heightColumn = cursur.getColumnIndexOrThrow(Images.Media.HEIGHT)
+
+                while (cursur.moveToNext()) {
+                    val id = cursur.getLong(idColumn)
+                    val displayName = cursur.getString(displayNameColumn)
+                    val width = cursur.getInt(widthColumn)
+                    val height = cursur.getInt(heightColumn)
+                    val contentUri =
+                        ContentUris.withAppendedId(Images.Media.EXTERNAL_CONTENT_URI, id)
+                    photos.add(SharedStoragePhoto(id, displayName, width, height, contentUri))
+                }
+            }
+            photos.toList()
+        }
+    }
+
+    private fun deletePhotoFromExternalStorage(photoUri: Uri) {
+        Log.d("TVS","Running2")
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                Log.d("TVS","Running3")
+                contentResolver.delete(photoUri, null, null)
+            } catch (e: SecurityException) {
+                val intentSender = when {
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
+                        Log.d("TVS","Running4")
+                        createDeleteRequest(
+                            contentResolver,
+                            listOf(photoUri)
+                        ).intentSender
+                    }
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> {
+                        Log.d("TVS","Running5")
+                        val recoverableSecurityException = e as? RecoverableSecurityException
+                        recoverableSecurityException?.userAction?.actionIntent?.intentSender
+                    }
+                    else -> null
+                }
+                intentSender?.let {
+                    Log.d("TVS","Running6")
+                    intentSenderLauncher.launch(IntentSenderRequest.Builder(it).build())
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        contentResolver.unregisterContentObserver(contentObserver)
+    }
 }
